@@ -1,28 +1,20 @@
-"""Dataset registry for loading datasets."""
+from typing import Tuple, List
+from otpt.data.eurosat import make_loaders as eurosat_make_loaders, EUROSAT_CLASSES
 
-from otpt.data.eurosat import get_eurosat_loaders
-
-
-DATASET_REGISTRY = {
-    "eurosat": get_eurosat_loaders,
+_REGISTRY = {
+    "eurosat": (eurosat_make_loaders, EUROSAT_CLASSES),
+    # Add more datasets here as needed
 }
 
-
-def get_dataset(dataset_name, batch_size=64):
-    """
-    Get dataset loaders and class names.
-    
-    Args:
-        dataset_name: Name of the dataset
-        batch_size: Batch size for data loaders
-        
-    Returns:
-        train_loader: Training data loader
-        val_loader: Validation data loader
-        class_names: List of class names
-    """
-    if dataset_name not in DATASET_REGISTRY:
-        raise ValueError(f"Unknown dataset: {dataset_name}. Available: {list(DATASET_REGISTRY.keys())}")
-    
-    loader_fn = DATASET_REGISTRY[dataset_name]
-    return loader_fn(batch_size=batch_size)
+def get_dataset(name: str, data_root: str, preprocess, batch_size: int, num_workers: int):
+    name = name.lower()
+    if name not in _REGISTRY:
+        raise KeyError(f"Unknown dataset '{name}'. Available: {list(_REGISTRY.keys())}")
+    make_loaders, classes = _REGISTRY[name]
+    train_loader, val_loader = make_loaders(
+        root=data_root,
+        preprocess=preprocess,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
+    return (train_loader, val_loader), classes
