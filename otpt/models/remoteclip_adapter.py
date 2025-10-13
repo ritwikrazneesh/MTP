@@ -33,9 +33,12 @@ class RemoteCLIPWrapper(nn.Module):
 
     def encode_text_from_tokens(self, token_embeddings: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         text = token_embeddings + self.model.positional_embedding.to(token_embeddings.dtype)
-        text = self.model.transformer(text, attn_mask)
+        context_length = text.shape[1]
+        causal_mask = torch.full((context_length, context_length), float("-inf"), device=text.device)
+        causal_mask = torch.triu(causal_mask, diagonal=1)
+        text = self.model.transformer(text, attn_mask=causal_mask)
         text = self.model.ln_final(text)
-        lengths = attn_mask.sum(dim=1) - 1
+        lengths = attn_mask.sum(dim=1) - 1  # Use attn_mask only to find EOT
         x = text[torch.arange(text.shape[0], device=text.device), lengths]
         x = x @ self.model.text_projection
         return x / x.norm(dim=-1, keepdim=True)
