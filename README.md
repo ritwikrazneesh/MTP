@@ -1,88 +1,87 @@
-# O-TPT + RemoteCLIP for Remote Sensing
+# O‑TPT on RemoteCLIP/OpenCLIP for Remote Sensing (Single Entry CLI)
 
-This repository provides a Kaggle-ready implementation of **O-TPT** (Online Test-Time Prompt Tuning) with **RemoteCLIP** for remote sensing image classification.
+Single-entry CLI for zero‑shot and label‑free O‑TPT (Orthogonality‑constrained Test‑time Prompt Tuning) in the remote sensing domain.
 
-## Features
+- Backends:
+  - remoteclip: load RemoteCLIP checkpoints via open-clip-torch (per RemoteCLIP README)
+  - openclip: OpenCLIP pretrained IDs (fallback)
+- Dataset: EuroSAT (RGB, single-label)
+- Metrics: Top‑1, Balanced Accuracy, NLL, ECE
 
-- **O-TPT**: Entropy minimization on confident samples with orthogonality regularization
-- **RemoteCLIP**: Remote sensing-specific CLIP model via open-clip checkpoints
-- **EuroSAT Dataset**: RGB, single-label land use classification with stratified 80/20 split
-- **Metrics**: Top-1 accuracy, Balanced accuracy, NLL, and ECE
-
-## Quickstart
-
-### Installation
+## Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Run Evaluation on EuroSAT
+## RemoteCLIP (per README)
 
+1) Install open-clip:
 ```bash
-# Using RemoteCLIP backend
-python -m otpt.cli --dataset eurosat --backend remoteclip --mode eval
-
-# Using OpenCLIP fallback
-python -m otpt.cli --dataset eurosat --backend openclip --mode eval
-
-# With custom O-TPT hyperparameters
-python -m otpt.cli --dataset eurosat --backend remoteclip --mode eval \
-  --otpt-lr 0.001 --otpt-steps 1 --entropy-threshold 0.6 --orth-reg 0.1
+pip install open-clip-torch
 ```
 
-### Using the Shell Script
+2) Download a RemoteCLIP checkpoint (e.g., `remoteclip_vitb32.pt`) and pass its path via `--pretrained-ckpt`.
 
+## Quickstart (EuroSAT)
+
+Zero-shot with RemoteCLIP checkpoint:
 ```bash
-bash scripts/run_eurosat.sh
+python -m otpt.cli \
+  --dataset eurosat \
+  --backend remoteclip \
+  --model-name ViT-B-32 \
+  --pretrained-ckpt /path/to/remoteclip_vitb32.pt \
+  --mode zeroshot \
+  --data-root ./data \
+  --batch-size 128
 ```
 
-### Validation
-
-To verify the installation and setup:
-
+O‑TPT (label‑free):
 ```bash
-python scripts/validate.py
+python -m otpt.cli \
+  --dataset eurosat \
+  --backend remoteclip \
+  --model-name ViT-B-32 \
+  --pretrained-ckpt /path/to/remoteclip_vitb32.pt \
+  --mode otpt \
+  --data-root ./data \
+  --batch-size 64 \
+  --n-ctx 8 \
+  --tta-steps 2 \
+  --lambda-orth 0.1 \
+  --selection-p 0.1
 ```
 
-## CLI Usage
-
-```
-python -m otpt.cli [OPTIONS]
-
-Options:
-  --dataset STR          Dataset to use (default: eurosat)
-  --backend STR          Model backend: remoteclip or openclip (default: remoteclip)
-  --mode STR             Mode: eval (default: eval)
-  --otpt-lr FLOAT        O-TPT learning rate (default: 0.001)
-  --otpt-steps INT       O-TPT optimization steps per batch (default: 1)
-  --entropy-threshold FLOAT  Confidence threshold for entropy filtering (default: 0.6)
-  --orth-reg FLOAT       Orthogonality regularization weight (default: 0.1)
-  --batch-size INT       Batch size (default: 64)
-  --seed INT             Random seed (default: 42)
+OpenCLIP fallback:
+```bash
+python -m otpt.cli \
+  --dataset eurosat \
+  --backend openclip \
+  --model-name ViT-B-16 \
+  --pretrained-id laion2b_s34b_b88k \
+  --mode otpt
 ```
 
-## Project Structure
+## Structure
 
-```
-otpt/
-├── cli.py                      # Main CLI entry point
-├── data/
-│   ├── registry.py            # Dataset registry
-│   └── eurosat.py             # EuroSAT dataset loader
-├── models/
-│   ├── remoteclip_adapter.py  # RemoteCLIP adapter
-│   ├── openclip_adapter.py    # OpenCLIP fallback
-│   └── otpt_core.py           # O-TPT implementation
-└── eval/
-    └── metrics.py             # Evaluation metrics
+- otpt/
+  - cli.py (single entry point; choose dataset/backend/mode via args)
+  - data/
+    - registry.py (dataset registry)
+    - eurosat.py (torchvision EuroSAT loader)
+  - models/
+    - remoteclip_adapter.py (RemoteCLIP via open-clip checkpoint)
+    - openclip_adapter.py (OpenCLIP fallback)
+    - otpt_core.py (entropy, orthogonality, TTA loop, AMP-safe)
+  - eval/
+    - metrics.py (ECE)
+- scripts/
+  - run_eurosat.sh (example runs)
 
-scripts/
-└── run_eurosat.sh             # Example evaluation script
-```
+## Notes
 
-## References
-
-- [RemoteCLIP](https://github.com/ChenDelong1999/RemoteCLIP)
-- [O-TPT Paper](https://arxiv.org/abs/2209.07511)
-- [EuroSAT Dataset](https://github.com/phelber/EuroSAT)
+- Template defaults to "a satellite photo of a {}". You can customize with `--template`.
+- We reset the prompt context per batch for stability at test time.
+- CPU/GPU compatible: AMP is enabled only on CUDA automatically.
+- Kaggle: clone the repo, install requirements, upload checkpoint to an accessible path, and run the CLI.
