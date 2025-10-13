@@ -37,6 +37,14 @@ python -m otpt.cli --dataset eurosat --backend remoteclip --mode eval \
 bash scripts/run_eurosat.sh
 ```
 
+### Validation
+
+To verify the installation and setup:
+
+```bash
+python scripts/validate.py
+```
+
 ## CLI Usage
 
 ```
