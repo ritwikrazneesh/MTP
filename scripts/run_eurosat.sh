@@ -1,20 +1,24 @@
-#!/bin/bash
-# Example script to run O-TPT evaluation on EuroSAT
+#!/usr/bin/env bash
+set -e
 
-echo "Running O-TPT + RemoteCLIP on EuroSAT..."
-echo ""
-
-# Run with RemoteCLIP backend
+# Zero-shot with RemoteCLIP checkpoint
 python -m otpt.cli \
-    --dataset eurosat \
-    --backend remoteclip \
-    --mode eval \
-    --otpt-lr 0.001 \
-    --otpt-steps 1 \
-    --entropy-threshold 0.6 \
-    --orth-reg 0.1 \
-    --batch-size 64 \
-    --seed 42
+  --dataset eurosat \
+  --backend remoteclip \
+  --model-name ViT-B-32 \
+  --pretrained-ckpt /path/to/remoteclip_vitb32.pt \
+  --mode zeroshot \
+  --batch-size 128
 
-echo ""
-echo "Evaluation complete!"
+# O-TPT with RemoteCLIP checkpoint
+python -m otpt.cli \
+  --dataset eurosat \
+  --backend remoteclip \
+  --model-name ViT-B-32 \
+  --pretrained-ckpt /path/to/remoteclip_vitb32.pt \
+  --mode otpt \
+  --batch-size 64 \
+  --n-ctx 8 \
+  --tta-steps 2 \
+  --lambda-orth 0.1 \
+  --selection-p 0.1
