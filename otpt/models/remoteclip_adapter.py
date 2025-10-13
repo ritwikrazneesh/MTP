@@ -64,7 +64,7 @@ class PromptLearner(nn.Module):
         self.ctx_pos = 1
         self.register_buffer("attn_mask", (self.tokenized != 0).to(torch.long))
 
-    def compose_embeds(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        def compose_embeds(self) -> Tuple[torch.Tensor, torch.Tensor]:
         n_cls, L, d = self.token_emb_fixed.shape
         L_new = L + self.n_ctx
         embeds = torch.zeros((n_cls, L_new, d), device=self.token_emb_fixed.device, dtype=self.token_emb_fixed.dtype)
@@ -81,4 +81,15 @@ class PromptLearner(nn.Module):
             mask[i, : self.ctx_pos] = m_pref
             mask[i, self.ctx_pos : self.ctx_pos + self.n_ctx] = 1
             mask[i, self.ctx_pos + self.n_ctx :] = m_suff
+
+        # --- SOLID FIX: ensure prompt length == model context length ---
+        max_length = self.model.positional_embedding.shape[0]  # typically 77
+        if embeds.shape[1] > max_length:
+            embeds = embeds[:, :max_length, :]
+            mask = mask[:, :max_length]
+        elif embeds.shape[1] < max_length:
+            pad_amt = max_length - embeds.shape[1]
+            embeds = torch.nn.functional.pad(embeds, (0,0,0,pad_amt))
+            mask = torch.nn.functional.pad(mask, (0,pad_amt))
+        # -------------------------------------------------------------
         return embeds, mask
