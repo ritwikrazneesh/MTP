@@ -3,7 +3,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import autocast, GradScaler
+try:
+    from torch.amp import autocast, GradScaler
+except ImportError:
+    from torch.cuda.amp import autocast, GradScaler
 
 
 class OTPT:
@@ -107,7 +110,10 @@ class OTPT:
         for step in range(self.steps):
             self.optimizer.zero_grad()
             
-            with autocast():
+            # Determine device type for autocast
+            device_type = 'cuda' if self.device.type == 'cuda' and torch.cuda.is_available() else 'cpu'
+            
+            with autocast(device_type=device_type):
                 # Forward pass
                 logits = self.model(images)
                 
@@ -125,7 +131,7 @@ class OTPT:
         
         # Final forward pass for inference
         with torch.no_grad():
-            with autocast():
+            with autocast(device_type=device_type):
                 logits = self.model(images)
                 probs = F.softmax(logits, dim=1)
         

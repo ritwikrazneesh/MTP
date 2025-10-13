@@ -28,10 +28,10 @@ class RemoteCLIPAdapter(nn.Module):
             )
         except Exception as e:
             print(f"Warning: Could not load RemoteCLIP checkpoint: {e}")
-            print("Falling back to standard OpenCLIP ViT-B-32...")
+            print("Falling back to standard OpenCLIP ViT-B-32 without pretrained weights...")
             self.model, _, self.preprocess = open_clip.create_model_and_transforms(
                 'ViT-B-32',
-                pretrained='laion2b_s34b_b79k'
+                pretrained=None
             )
         
         self.tokenizer = open_clip.get_tokenizer('ViT-B-32')
@@ -58,8 +58,18 @@ class RemoteCLIPAdapter(nn.Module):
     
     def _init_prompt_context(self):
         """Initialize learnable prompt context for O-TPT."""
-        # Get embedding dimension
-        embed_dim = self.model.text.text_projection.shape[1]
+        # Get embedding dimension from the visual encoder
+        # For ViT-B-32, the embedding dimension is typically 512
+        try:
+            if hasattr(self.model, 'text_projection'):
+                embed_dim = self.model.text_projection.shape[1]
+            elif hasattr(self.model, 'transformer'):
+                embed_dim = self.model.transformer.width
+            else:
+                # Default for ViT-B-32
+                embed_dim = 512
+        except:
+            embed_dim = 512
         
         # Initialize learnable context vectors (4 context tokens)
         ctx_init = torch.empty(4, embed_dim)

@@ -18,10 +18,18 @@ class OpenCLIPAdapter(nn.Module):
         
         # Load OpenCLIP model
         print(f"Loading OpenCLIP model ({model_name})...")
-        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-            model_name,
-            pretrained=pretrained
-        )
+        try:
+            self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+                model_name,
+                pretrained=pretrained
+            )
+        except Exception as e:
+            print(f"Warning: Could not download pretrained weights: {e}")
+            print("Loading model without pretrained weights (random initialization)...")
+            self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+                model_name,
+                pretrained=None
+            )
         
         self.tokenizer = open_clip.get_tokenizer(model_name)
         self.model.to(device)
@@ -47,8 +55,18 @@ class OpenCLIPAdapter(nn.Module):
     
     def _init_prompt_context(self):
         """Initialize learnable prompt context for O-TPT."""
-        # Get embedding dimension
-        embed_dim = self.model.text.text_projection.shape[1]
+        # Get embedding dimension from the visual encoder
+        # For ViT-B-32, the embedding dimension is typically 512
+        try:
+            if hasattr(self.model, 'text_projection'):
+                embed_dim = self.model.text_projection.shape[1]
+            elif hasattr(self.model, 'transformer'):
+                embed_dim = self.model.transformer.width
+            else:
+                # Default for ViT-B-32
+                embed_dim = 512
+        except:
+            embed_dim = 512
         
         # Initialize learnable context vectors (4 context tokens)
         ctx_init = torch.empty(4, embed_dim)
