@@ -64,7 +64,7 @@ class PromptLearner(nn.Module):
         self.ctx_pos = 1
         self.register_buffer("attn_mask", (self.tokenized != 0).to(torch.long))
 
-        def compose_embeds(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def compose_embeds(self) -> Tuple[torch.Tensor, torch.Tensor]:
         n_cls, L, d = self.token_emb_fixed.shape
         L_new = L + self.n_ctx
         embeds = torch.zeros((n_cls, L_new, d), device=self.token_emb_fixed.device, dtype=self.token_emb_fixed.dtype)
