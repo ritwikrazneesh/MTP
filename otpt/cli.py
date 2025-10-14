@@ -48,7 +48,7 @@ def evaluate(loader, modelw, pl, mode: str, tta_steps: int, lambda_orth: float, 
     eps = 1e-12
     nll = log_loss(labels_np, np.clip(probs_np, eps, 1 - eps), labels=list(range(probs_np.shape[1])))
     ece = expected_calibration_error(probs_np, labels_np, n_bins=15)
-    return {"top1": top1, "balanced_acc": bal_acc, "nll": nll, "ece": ece}
+    return {"top1": top1, "balanced_acc": bal_acc, "nll": nll, "ece": ece*100}
 
 
 def main():
