@@ -45,7 +45,12 @@ def otpt_adapt_and_infer(
 
     optim = torch.optim.AdamW([prompt_learner.ctx], lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
 
-    for _ in range(tta_steps):
+    # Debug: Print prompt before adaptation
+    print("[O-TPT] Prompt ctx before adaptation:", prompt_learner.ctx.data.clone().cpu().numpy()[:5])
+
+    print("[O-TPT] prompt_learner.ctx.requires_grad:", prompt_learner.ctx.requires_grad)
+    
+    for step in range(tta_steps):
         with amp_ctx:
             embeds, mask = prompt_learner.compose_embeds()
             text_feats = model_wrapper.encode_text_from_tokens(embeds, mask)
@@ -65,6 +70,13 @@ def otpt_adapt_and_infer(
         else:
             loss.backward()
             optim.step()
+
+        # Debug: Print prompt after each adaptation step
+        print(f"[O-TPT][step {step+1}/{tta_steps}] Prompt ctx:", prompt_learner.ctx.data.clone().cpu().numpy()[:5])
+        print(f"[O-TPT][step {step+1}] loss_ent={loss_ent.item():.6f}, loss_orth={loss_orth.item():.6f}, total_loss={loss.item():.6f}")
+
+    # Debug: Print prompt after all adaptation
+    print("[O-TPT] Prompt ctx after adaptation:", prompt_learner.ctx.data.clone().cpu().numpy()[:5])
 
     with torch.no_grad():
         embeds, mask = prompt_learner.compose_embeds()
