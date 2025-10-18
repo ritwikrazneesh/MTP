@@ -36,8 +36,8 @@ def otpt_adapt_and_infer(
     tta_steps: int = 1,
     lambda_orth: float = 0.1,
     selection_p: float = 0.1,
-    #lr: float = 5e-3,
-    lr: float = 1,
+    lr: float = 5e-3,
+    #lr: float = 1,
 ) -> torch.Tensor:
     device = prompt_learner.ctx.device
     use_cuda_amp = (device.type == "cuda")
