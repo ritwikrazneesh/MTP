@@ -69,6 +69,11 @@ def otpt_adapt_and_infer(
             scaler.update()
         else:
             loss.backward()
+            ####
+            print("[O-TPT] ctx.grad after backward:", prompt_learner.ctx.grad)
+            if prompt_learner.ctx.grad is not None:
+                print("[O-TPT] ctx.grad norm:", prompt_learner.ctx.grad.norm().item())
+            ####
             optim.step()
 
         # Debug: Print prompt after each adaptation step
