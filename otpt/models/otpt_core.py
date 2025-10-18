@@ -36,7 +36,8 @@ def otpt_adapt_and_infer(
     tta_steps: int = 1,
     lambda_orth: float = 0.1,
     selection_p: float = 0.1,
-    lr: float = 5e-3,
+    #lr: float = 5e-3,
+    lr: float = 1,
 ) -> torch.Tensor:
     device = prompt_learner.ctx.device
     use_cuda_amp = (device.type == "cuda")
@@ -85,6 +86,9 @@ def otpt_adapt_and_infer(
 
     with torch.no_grad():
         embeds, mask = prompt_learner.compose_embeds()
+        ###
+        print("[O-TPT] ctx in compose_embeds:", prompt_learner.ctx.data.clone().cpu().numpy()[:5])
+        ###
         text_feats = model_wrapper.encode_text_from_tokens(embeds, mask)
         img_feats = model_wrapper.encode_image(images)
         logits = model_wrapper.logit_scale.exp() * (img_feats @ text_feats.t())
