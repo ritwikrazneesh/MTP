@@ -66,6 +66,11 @@ def otpt_adapt_and_infer(
         optim.zero_grad(set_to_none=True)
         if use_cuda_amp:
             scaler.scale(loss).backward()
+            ####
+            print("[O-TPT] ctx.grad after backward:", prompt_learner.ctx.grad)
+            if prompt_learner.ctx.grad is not None:
+                print("[O-TPT] ctx.grad norm:", prompt_learner.ctx.grad.norm().item())
+            ####
             scaler.step(optim)
             scaler.update()
         else:
