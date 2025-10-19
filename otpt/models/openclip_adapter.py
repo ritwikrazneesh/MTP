@@ -2,8 +2,8 @@ from typing import List, Tuple
 import torch
 import torch.nn as nn
 import open_clip
+from otpt.utils.debug import log, is_debug
 
-# Same RS template bank to keep behavior aligned across backends
 RS_TEMPLATES = [
     "a satellite photo of a {}.",
     "an aerial view of a {}.",
@@ -23,7 +23,6 @@ def build_openclip(model_name: str, pretrained: str, device: str = "cuda"):
     tokenizer = open_clip.get_tokenizer(model_name)
     return model, tokenizer, preprocess
 
-
 class OpenClipWrapper(nn.Module):
     def __init__(self, model):
         super().__init__()
@@ -35,7 +34,10 @@ class OpenClipWrapper(nn.Module):
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
         feats = self.model.encode_image(images)
-        return feats / feats.norm(dim=-1, keepdim=True)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+        if is_debug():
+            log(f"[ENC] image feats shape={tuple(feats.shape)}")
+        return feats
 
     def encode_text_from_tokens(self, token_embeddings: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         text = token_embeddings + self.model.positional_embedding.to(token_embeddings.dtype)
@@ -47,8 +49,10 @@ class OpenClipWrapper(nn.Module):
         lengths = attn_mask.sum(dim=1) - 1
         x = text[torch.arange(text.shape[0], device=text.device), lengths]
         x = x @ self.model.text_projection
-        return x / x.norm(dim=-1, keepdim=True)
-
+        x = x / x.norm(dim=-1, keepdim=True)
+        if is_debug():
+            log(f"[ENC] text feats shape={tuple(x.shape)}")
+        return x
 
 class PromptLearner(nn.Module):
     def __init__(self, model, tokenizer, classnames: List[str], n_ctx: int = 8, template: str = "a satellite photo of a {}.", device: str = "cuda"):
@@ -60,8 +64,11 @@ class PromptLearner(nn.Module):
         self.n_ctx = n_ctx
 
         tpl_list = [template] + RS_TEMPLATES
-        seen = set()
-        self.templates = [t for t in tpl_list if not (t in seen or seen.add(t))]
+        seen, templates = set(), []
+        for t in tpl_list:
+            if t not in seen:
+                templates.append(t); seen.add(t)
+        self.templates = templates
         self.n_tpl = len(self.templates)
 
         prompts = [tpl.format(name) for name in self.classnames for tpl in self.templates]
@@ -79,13 +86,17 @@ class PromptLearner(nn.Module):
         self.ctx_pos = 1
         self.register_buffer("attn_mask", (self.tokenized != 0).to(torch.long))
 
+        if is_debug():
+            log(f"[PL] classes={self.num_classes}, templates={self.n_tpl}, n_ctx={self.n_ctx}, token_emb_fixed={tuple(self.token_emb_fixed.shape)}")
+
     @torch.no_grad()
     def reset(self):
-        if hasattr(self, "ctx_init"):
-            self.ctx.copy_(self.ctx_init)
+        self.ctx.copy_(self.ctx_init)
+        if is_debug():
+            log("[PL] reset ctx to deterministic init")
 
     def compose_embeds(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        N, L, d = self.token_emb_fixed.shape
+        N, L, d = self.token_emb_fixed.shape  # N = C*T
         L_new = L + self.n_ctx
         device = self.token_emb_fixed.device
         dtype = self.token_emb_fixed.dtype
@@ -114,4 +125,7 @@ class PromptLearner(nn.Module):
             pad_amt = max_length - embeds.shape[1]
             embeds = torch.nn.functional.pad(embeds, (0, 0, 0, pad_amt))
             mask = torch.nn.functional.pad(mask, (0, pad_amt))
+
+        if is_debug():
+            log(f"[PL] compose_embeds -> embeds={tuple(embeds.shape)}, mask={tuple(mask.shape)}")
         return embeds, mask
