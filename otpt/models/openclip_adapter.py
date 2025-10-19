@@ -3,10 +3,22 @@ import torch
 import torch.nn as nn
 import open_clip
 
+# Same RS template bank to keep behavior aligned across backends
+RS_TEMPLATES = [
+    "a satellite photo of a {}.",
+    "an aerial view of a {}.",
+    "a remote sensing image of a {}.",
+    "an overhead photo of a {}.",
+    "overhead satellite imagery of a {}.",
+    "a high-resolution aerial image of a {}.",
+    "a photo of a {} from above.",
+]
 
 def build_openclip(model_name: str, pretrained: str, device: str = "cuda"):
     model, _, preprocess = open_clip.create_model_and_transforms(
-        model_name, pretrained=pretrained, device=device
+        model_name,
+        pretrained=pretrained,
+        device=device
     )
     tokenizer = open_clip.get_tokenizer(model_name)
     return model, tokenizer, preprocess
@@ -32,7 +44,7 @@ class OpenClipWrapper(nn.Module):
         causal_mask = torch.triu(causal_mask, diagonal=1)
         text = self.model.transformer(text, attn_mask=causal_mask)
         text = self.model.ln_final(text)
-        lengths = attn_mask.sum(dim=1) - 1  # Use attn_mask only to find EOT
+        lengths = attn_mask.sum(dim=1) - 1
         x = text[torch.arange(text.shape[0], device=text.device), lengths]
         x = x @ self.model.text_projection
         return x / x.norm(dim=-1, keepdim=True)
@@ -43,16 +55,22 @@ class PromptLearner(nn.Module):
         super().__init__()
         self.model = model
         self.tokenizer = tokenizer
-        self.classnames = [c.replace("_", " ") for c in classnames]
+        self.classnames = [c.replace("_", " ").replace("-", " ").strip() for c in classnames]
+        self.num_classes = len(self.classnames)
         self.n_ctx = n_ctx
-        self.template = template
 
-        prompts = [self.template.format(name) for name in self.classnames]
+        tpl_list = [template] + RS_TEMPLATES
+        seen = set()
+        self.templates = [t for t in tpl_list if not (t in seen or seen.add(t))]
+        self.n_tpl = len(self.templates)
+
+        prompts = [tpl.format(name) for name in self.classnames for tpl in self.templates]
         tokenized = self.tokenizer(prompts)
         self.register_buffer("tokenized", tokenized)
 
         d = self.model.transformer.width
         self.ctx = nn.Parameter(torch.randn(n_ctx, d, device=device) * 0.02)
+        self.register_buffer("ctx_init", self.ctx.detach().clone())
 
         with torch.no_grad():
             token_emb = self.model.token_embedding(self.tokenized.to(device))
@@ -61,12 +79,21 @@ class PromptLearner(nn.Module):
         self.ctx_pos = 1
         self.register_buffer("attn_mask", (self.tokenized != 0).to(torch.long))
 
+    @torch.no_grad()
+    def reset(self):
+        if hasattr(self, "ctx_init"):
+            self.ctx.copy_(self.ctx_init)
+
     def compose_embeds(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        n_cls, L, d = self.token_emb_fixed.shape
+        N, L, d = self.token_emb_fixed.shape
         L_new = L + self.n_ctx
-        embeds = torch.zeros((n_cls, L_new, d), device=self.token_emb_fixed.device, dtype=self.token_emb_fixed.dtype)
-        mask = torch.zeros((n_cls, L_new), device=self.attn_mask.device, dtype=self.attn_mask.dtype)
-        for i in range(n_cls):
+        device = self.token_emb_fixed.device
+        dtype = self.token_emb_fixed.dtype
+
+        embeds = torch.zeros((N, L_new, d), device=device, dtype=dtype)
+        mask = torch.zeros((N, L_new), device=device, dtype=self.attn_mask.dtype)
+
+        for i in range(N):
             prefix = self.token_emb_fixed[i, : self.ctx_pos, :]
             suffix = self.token_emb_fixed[i, self.ctx_pos :, :]
             embeds[i, : self.ctx_pos, :] = prefix
@@ -79,14 +106,12 @@ class PromptLearner(nn.Module):
             mask[i, self.ctx_pos : self.ctx_pos + self.n_ctx] = 1
             mask[i, self.ctx_pos + self.n_ctx :] = m_suff
 
-        # --- SOLID FIX: ensure prompt length == model context length ---
-        max_length = self.model.positional_embedding.shape[0]  # typically 77
+        max_length = self.model.positional_embedding.shape[0]
         if embeds.shape[1] > max_length:
             embeds = embeds[:, :max_length, :]
             mask = mask[:, :max_length]
         elif embeds.shape[1] < max_length:
             pad_amt = max_length - embeds.shape[1]
-            embeds = torch.nn.functional.pad(embeds, (0,0,0,pad_amt))
-            mask = torch.nn.functional.pad(mask, (0,pad_amt))
-        # -------------------------------------------------------------
+            embeds = torch.nn.functional.pad(embeds, (0, 0, 0, pad_amt))
+            mask = torch.nn.functional.pad(mask, (0, pad_amt))
         return embeds, mask
