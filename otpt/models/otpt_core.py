@@ -1,43 +1,52 @@
 import torch
 from contextlib import nullcontext
-from torch.cuda.amp import GradScaler as CudaGradScaler
+from torch.cuda.amp import autocast as cuda_autocast, GradScaler as CudaGradScaler
 
-def avg_entropy_softmax_stable(logits: torch.Tensor) -> torch.Tensor:
-    """
-    Numerically-stable entropy:
-      H(p) = -sum_i p_i * log p_i, with p = softmax(logits)
-    Use log_softmax to avoid overflow/underflow.
-    """
-    log_probs = torch.log_softmax(logits, dim=1)
-    probs = log_probs.exp()
-    return -(probs * log_probs).sum(dim=1).mean()
 
-def select_confident_indices_stable(logits: torch.Tensor, percentile: float = 0.1) -> torch.Tensor:
-    """
-    Select lowest-entropy samples (most confident) using a stable entropy estimator.
-    """
-    log_probs = torch.log_softmax(logits, dim=1)
-    probs = log_probs.exp()
-    ent = -(probs * log_probs).sum(dim=1)
-    k = max(1, int(ent.numel() * percentile))
+def avg_entropy_softmax(logits: torch.Tensor) -> torch.Tensor:
+    probs = logits.softmax(dim=1).clamp_min(1e-8)
+    return -(probs * probs.log()).sum(dim=1).mean()
+
+
+def select_confident_indices(logits: torch.Tensor, percentile: float = 0.1) -> torch.Tensor:
+    probs = logits.softmax(dim=1).clamp_min(1e-8)
+    ent = -(probs * probs.log()).sum(dim=1)
+    k = max(1, int(len(ent) * percentile))
     return ent.topk(k, largest=False).indices
 
-def orthogonality_loss_on_text(text_feats: torch.Tensor) -> torch.Tensor:
-    """
-    Encourage orthogonality among class text features.
-    text_feats: [C, D], assumed L2-normalized per row.
-    Penalize (W W^T - I).
-    """
-    G = text_feats @ text_feats.t()               # [C, C], cosine similarities since rows are normalized
+
+def orthogonality_loss(ctx: torch.Tensor) -> torch.Tensor:
+    G = ctx @ ctx.t()  # (n_ctx, n_ctx)
     I = torch.eye(G.size(0), device=G.device, dtype=G.dtype)
     return ((G - I) ** 2).mean()
 
+
 @torch.no_grad()
 def infer_logits(model_wrapper, prompt_learner, images: torch.Tensor) -> torch.Tensor:
+    """
+    Zero-shot inference with prompt ensembling:
+    - Build text features for all templates
+    - Average per class in feature space and renormalize
+    - Compute scaled cosine similarities
+    """
     embeds, mask = prompt_learner.compose_embeds()
-    text_feats = model_wrapper.encode_text_from_tokens(embeds, mask)  # [C, D], normalized in wrapper
-    img_feats = model_wrapper.encode_image(images)                    # [B, D], normalized in wrapper
+    text_feats_all = model_wrapper.encode_text_from_tokens(embeds, mask)  # [C*T, D] if ensembling, else [C, D]
+
+    # If PromptLearner exposes template count, aggregate per class
+    if hasattr(prompt_learner, "n_tpl") and prompt_learner.n_tpl > 1:
+        C = getattr(prompt_learner, "num_classes", None)
+        T = prompt_learner.n_tpl
+        if C is None:
+            # Fallback: infer C from length
+            C = text_feats_all.shape[0] // T
+        text_feats = text_feats_all.view(C, T, -1).mean(dim=1)
+        text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
+    else:
+        text_feats = text_feats_all
+
+    img_feats = model_wrapper.encode_image(images)  # [B, D], normalized in wrapper
     return model_wrapper.logit_scale.exp() * (img_feats @ text_feats.t())
+
 
 def otpt_adapt_and_infer(
     model_wrapper,
@@ -48,59 +57,59 @@ def otpt_adapt_and_infer(
     selection_p: float = 0.1,
     lr: float = 5e-3,
 ) -> torch.Tensor:
-    """
-    Test-time prompt adaptation loop with stable losses and fp32 to prevent NaN grads.
-    Key differences vs before:
-      - Use log_softmax-based entropy and confidence selection (stable).
-      - Compute loss on cosine similarities (no logit_scale in loss path).
-      - Detach image features (only adapt text/prompt).
-      - Apply orthogonality on TEXT FEATURES (not raw ctx).
-      - Disable AMP here; clip grads; guard non-finite steps.
-    """
-    # Force fp32 in adaptation to avoid fp16 instability on small prompt tensors
-    use_cuda_amp = False
-    scaler = CudaGradScaler(enabled=False)
-    amp_ctx = nullcontext()
+    device = prompt_learner.ctx.device
+    use_cuda_amp = (device.type == "cuda")
+    scaler = CudaGradScaler(enabled=use_cuda_amp)
+    amp_ctx = cuda_autocast() if use_cuda_amp else nullcontext()
 
     optim = torch.optim.AdamW([prompt_learner.ctx], lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
 
     for _ in range(tta_steps):
         with amp_ctx:
-            # Compose text features for current prompt
             embeds, mask = prompt_learner.compose_embeds()
-            text_feats = model_wrapper.encode_text_from_tokens(embeds, mask)  # [C, D], normalized
+            text_feats_all = model_wrapper.encode_text_from_tokens(embeds, mask)
 
-            # Image features are fixed (not adapted); detach graph
-            with torch.no_grad():
-                img_feats = model_wrapper.encode_image(images)                # [B, D], normalized
+            # Aggregate over templates during adaptation too, if using ensembling
+            if hasattr(prompt_learner, "n_tpl") and prompt_learner.n_tpl > 1:
+                C = getattr(prompt_learner, "num_classes", None)
+                T = prompt_learner.n_tpl
+                if C is None:
+                    C = text_feats_all.shape[0] // T
+                text_feats = text_feats_all.view(C, T, -1).mean(dim=1)
+                text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
+            else:
+                text_feats = text_feats_all
 
-            # Use cosine similarities for adaptation (no exp(logit_scale) here)
-            sims = img_feats @ text_feats.t()                                 # [B, C]
+            img_feats = model_wrapper.encode_image(images)
+            logits = model_wrapper.logit_scale.exp() * (img_feats @ text_feats.t())
 
-            # Select confident subset and compute stable entropy
-            idx = select_confident_indices_stable(sims.detach(), percentile=selection_p)
-            loss_ent = avg_entropy_softmax_stable(sims[idx])
-
-            # Orthogonality on text features
-            loss_orth = orthogonality_loss_on_text(text_feats)
-
+            idx = select_confident_indices(logits.detach(), percentile=selection_p)
+            loss_ent = avg_entropy_softmax(logits[idx])
+            loss_orth = orthogonality_loss(prompt_learner.ctx)
             loss = loss_ent + lambda_orth * loss_orth
 
         optim.zero_grad(set_to_none=True)
-        loss.backward()
+        if use_cuda_amp:
+            scaler.scale(loss).backward()
+            scaler.step(optim)
+            scaler.update()
+        else:
+            loss.backward()
+            optim.step()
 
-        # Clip and guard against non-finite grads (prevents stuck NaN steps)
-        grad_norm = torch.nn.utils.clip_grad_norm_([prompt_learner.ctx], max_norm=1.0)
-        if not torch.isfinite(grad_norm):
-            optim.zero_grad(set_to_none=True)
-            continue
-
-        optim.step()
-
-    # Final inference (with logit_scale) for metrics/reporting
     with torch.no_grad():
         embeds, mask = prompt_learner.compose_embeds()
-        text_feats = model_wrapper.encode_text_from_tokens(embeds, mask)
+        text_feats_all = model_wrapper.encode_text_from_tokens(embeds, mask)
+        if hasattr(prompt_learner, "n_tpl") and prompt_learner.n_tpl > 1:
+            C = getattr(prompt_learner, "num_classes", None)
+            T = prompt_learner.n_tpl
+            if C is None:
+                C = text_feats_all.shape[0] // T
+            text_feats = text_feats_all.view(C, T, -1).mean(dim=1)
+            text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
+        else:
+            text_feats = text_feats_all
+
         img_feats = model_wrapper.encode_image(images)
         logits = model_wrapper.logit_scale.exp() * (img_feats @ text_feats.t())
     return logits
