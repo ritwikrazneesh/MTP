@@ -10,6 +10,7 @@ from otpt.eval.metrics import expected_calibration_error
 from otpt.models.otpt_core import infer_logits, otpt_adapt_and_infer
 from otpt.models.openclip_adapter import build_openclip, OpenClipWrapper as OCLIP_Wrap, PromptLearner as OCLIP_Prompt
 from otpt.models.remoteclip_adapter import build_remoteclip_via_openclip, RemoteCLIPWrapper as RCLIP_Wrap, PromptLearner as RCLIP_Prompt
+from otpt.utils.debug import set_debug, log
 
 def evaluate(loader, modelw, pl, mode: str, tta_steps: int, lambda_orth: float, selection_p: float, device: str):
     modelw.eval()
@@ -23,7 +24,6 @@ def evaluate(loader, modelw, pl, mode: str, tta_steps: int, lambda_orth: float, 
         if mode == "zeroshot":
             logits = infer_logits(modelw, pl, images)
         elif mode == "otpt":
-            # Reset to deterministic init instead of randomizing per-batch
             with torch.no_grad():
                 if hasattr(pl, "reset"):
                     pl.reset()
@@ -70,11 +70,15 @@ def main():
     p.add_argument("--selection-p", type=float, default=0.1)
     # OpenCLIP identifiers
     p.add_argument("--model-name", type=str, default="ViT-B-32")
-    p.add_argument("--pretrained-id", type=str, default="laion2b_s34b_b88k")  # OpenCLIP fallback
-    # RemoteCLIP checkpoint path (per README using open-clip)
-    p.add_argument("--pretrained-ckpt", type=str, default="", help="Path to RemoteCLIP .pt checkpoint (e.g., remoteclip_vitb32.pt)")
+    p.add_argument("--pretrained-id", type=str, default="laion2b_s34b_b88k")
+    # RemoteCLIP checkpoint path
+    p.add_argument("--pretrained-ckpt", type=str, default="", help="Path to RemoteCLIP .pt checkpoint")
+    # Debug
+    p.add_argument("--debug", action="store_true", help="Enable verbose debug logs")
 
     args = p.parse_args()
+    set_debug(args.debug)
+
     device = args.device if torch.cuda.is_available() else "cpu"
 
     # Build model + preprocess + tokenizer
@@ -97,7 +101,6 @@ def main():
         modelw = OCLIP_Wrap(model_raw).to(device)
         Prompt = OCLIP_Prompt
 
-    # Dataset
     loaders, classnames = get_dataset(
         name=args.dataset,
         data_root=args.data_root,
@@ -107,10 +110,13 @@ def main():
     )
     _, val_loader = loaders
 
-    # Prompt learner
     pl = Prompt(model_raw, tokenizer, classnames, n_ctx=args.n_ctx, template=args.template, device=device).to(device)
 
-    # Eval
+    if args.debug:
+        log(f"[RUN] dataset={args.dataset}, backend={args.backend}, model={args.model_name}, mode={args.mode}")
+        log(f"[RUN] n_ctx={args.n_ctx}, tta_steps={args.tta_steps}, lambda_orth={args.lambda_orth}, selection_p={args.selection_p}")
+        log(f"[RUN] classes={len(classnames)}, first_classes={classnames[:5]}")
+
     metrics = evaluate(
         val_loader, modelw, pl,
         mode=args.mode,
