@@ -11,7 +11,6 @@ from otpt.models.otpt_core import infer_logits, otpt_adapt_and_infer
 from otpt.models.openclip_adapter import build_openclip, OpenClipWrapper as OCLIP_Wrap, PromptLearner as OCLIP_Prompt
 from otpt.models.remoteclip_adapter import build_remoteclip_via_openclip, RemoteCLIPWrapper as RCLIP_Wrap, PromptLearner as RCLIP_Prompt
 
-
 def evaluate(loader, modelw, pl, mode: str, tta_steps: int, lambda_orth: float, selection_p: float, device: str):
     modelw.eval()
     acc_metric = MulticlassAccuracy(num_classes=len(pl.classnames)).to(device)
@@ -24,8 +23,10 @@ def evaluate(loader, modelw, pl, mode: str, tta_steps: int, lambda_orth: float, 
         if mode == "zeroshot":
             logits = infer_logits(modelw, pl, images)
         elif mode == "otpt":
+            # Reset to deterministic init instead of randomizing per-batch
             with torch.no_grad():
-                pl.ctx.normal_(mean=0.0, std=0.02)  # reset per batch
+                if hasattr(pl, "reset"):
+                    pl.reset()
             logits = otpt_adapt_and_infer(
                 modelw, pl, images,
                 tta_steps=tta_steps,
@@ -48,8 +49,7 @@ def evaluate(loader, modelw, pl, mode: str, tta_steps: int, lambda_orth: float, 
     eps = 1e-12
     nll = log_loss(labels_np, np.clip(probs_np, eps, 1 - eps), labels=list(range(probs_np.shape[1])))
     ece = expected_calibration_error(probs_np, labels_np, n_bins=15)
-    return {"top1": top1, "balanced_acc": bal_acc, "nll": nll, "ece": ece*100}
-
+    return {"top1": top1, "balanced_acc": bal_acc, "nll": nll, "ece": ece * 100}
 
 def main():
     p = argparse.ArgumentParser("O-TPT single-entry CLI (RemoteCLIP/OpenCLIP)")
@@ -120,7 +120,6 @@ def main():
         device=device,
     )
     print(f"[{args.backend}][{args.dataset}][{args.mode}] -> {metrics}")
-
 
 if __name__ == "__main__":
     main()
