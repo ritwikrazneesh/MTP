@@ -10,6 +10,7 @@ from otpt.models.otpt_core import infer_logits, otpt_adapt_and_infer, find_best_
 
 def parse_args():
     p = argparse.ArgumentParser("O-TPT / RemoteCLIP RS eval with canonical class names + temperature scaling")
+
     # Data
     p.add_argument("--dataset", type=str, required=True, choices=[
         "eurosat", "patternnet", "nwpu-resisc45", "ucm", "whu-rs19", "aid"
@@ -19,6 +20,11 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--canonicalize-classes", action="store_true", help="Map folder class names to canonical phrases for prompts")
+
+    # Fast eval sampling (NEW)
+    p.add_argument("--subset-samples", type=int, default=0, help="Uniform random subset size for fast eval (0 = full set)")
+    p.add_argument("--subset-per-class", type=int, default=0, help="Stratified samples per class for fast eval (0 = disabled)")
+    p.add_argument("--subset-seed", type=int, default=0, help="Seed for reproducible subsetting")
 
     # Backend / Model
     p.add_argument("--backend", type=str, default="remoteclip", choices=["remoteclip", "openclip"])
@@ -49,15 +55,47 @@ def parse_args():
     set_debug(args.debug)
     return args
 
+def _compute_ece(probs: torch.Tensor, labels: torch.Tensor, num_bins: int = 15) -> float:
+    confidences, preds = probs.max(dim=1)
+    accuracies = preds.eq(labels)
+    bin_boundaries = torch.linspace(0, 1, num_bins + 1)
+    ece = 0.0
+    for i in range(num_bins):
+        lower, upper = bin_boundaries[i], bin_boundaries[i+1]
+        mask = (confidences > lower) & (confidences <= upper)
+        if mask.any():
+            bin_acc = accuracies[mask].float().mean().item()
+            bin_conf = confidences[mask].mean().item()
+            ece += (mask.float().mean().item()) * abs(bin_conf - bin_acc)
+    return ece
+
+def _compute_metrics(probs: torch.Tensor, labels: torch.Tensor, num_bins: int = 15):
+    preds = probs.argmax(dim=1)
+    top1 = (preds == labels).float().mean().item()
+    # Balanced accuracy
+    try:
+        from sklearn.metrics import balanced_accuracy_score
+        balanced_acc = balanced_accuracy_score(labels.numpy(), preds.numpy())
+    except Exception:
+        balanced_acc = top1
+    # Negative log-likelihood
+    nll = -torch.log(probs[torch.arange(labels.size(0)), labels]).mean().item()
+    # ECE
+    ece = _compute_ece(probs, labels, num_bins=num_bins)
+    return {
+        "top1": top1,
+        "balanced_acc": balanced_acc,
+        "nll": nll,
+        "ece": ece * 100,
+    }
+
 def main():
     args = parse_args()
-
-        # ... inside main() right after args parsing ...
-    if args.mode == "otpt" and args.n_ctx <= 0:
-        raise SystemExit("O-TPT requires --n-ctx > 0 (e.g., --n-ctx 8 or 16).")
-
-    
     device = args.device if torch.cuda.is_available() else "cpu"
+
+    # Prevent accidental O-TPT with n_ctx=0
+    if args.mode == "otpt" and args.n_ctx <= 0:
+        raise SystemExit("O-TPT requires --n-ctx > 0. Set, e.g., --n-ctx 8 or 16.")
 
     # Build model + preprocess + tokenizer
     if args.backend == "remoteclip":
@@ -85,7 +123,10 @@ def main():
         preprocess=preprocess,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        use_canonical=args.canonicalize_classes,
+        use_canonical=args.canonicalize-classes if hasattr(args, "canonicalize-classes") else args.canonicalize_classes,
+        subset_samples=args.subset_samples,
+        subset_per_class=args.subset_per_class,
+        subset_seed=args.subset_seed,
     )
     _, val_loader = loaders
 
@@ -95,6 +136,7 @@ def main():
     if is_debug():
         log(f"[RUN] dataset={args.dataset}, backend={args.backend}, model={args.model_name}, mode={args.mode}")
         log(f"[RUN] classes={len(classnames)}; first 5={classnames[:5]}")
+        log(f"[RUN] subset: samples={args.subset_samples}, per_class={args.subset_per_class}, seed={args.subset_seed}")
 
     modelw.eval()
     pl.eval()
@@ -116,7 +158,6 @@ def main():
                     selection_p=args.selection_p,
                     lr=args.otpt_lr,
                 )
-                # reset prompt for next batch adaptation
                 pl.reset()
             else:
                 logits = infer_logits(modelw, pl, images)
@@ -127,14 +168,10 @@ def main():
     logits = torch.cat(all_logits, dim=0)
     labels = torch.cat(all_labels, dim=0)
 
-    # Argmax predictions (same before/after TS)
-    preds = logits.argmax(dim=1)
+    # Metrics
     probs = torch.softmax(logits, dim=1)
-
-    top1 = (preds == labels).float().mean().item()
-
-    # Optional Temperature Scaling
     if args.temp_scale:
+        from otpt.models.otpt_core import find_best_temperature, apply_temperature
         T = find_best_temperature(
             logits,
             labels=None if args.temp_metric == "entropy" else labels,
@@ -144,40 +181,11 @@ def main():
             T_max=max(args.temp_range),
             steps=args.temp_steps,
         )
-        logits_scaled = apply_temperature(logits, T)
-        probs_scaled = torch.softmax(logits_scaled, dim=1)
-        # ECE after TS
-        metrics = _compute_metrics(probs_scaled, labels, num_bins=args.ece_bins)
-        print(f"[remoteclip][{args.dataset}][{args.mode}] -> {metrics}")
-    else:
-        metrics = _compute_metrics(probs, labels, num_bins=args.ece_bins)
-        print(f"[remoteclip][{args.dataset}][{args.mode}] -> {metrics}")
+        logits = apply_temperature(logits, T)
+        probs = torch.softmax(logits, dim=1)
 
-def _compute_metrics(probs: torch.Tensor, labels: torch.Tensor, num_bins: int = 15):
-    preds = probs.argmax(dim=1)
-    top1 = (preds == labels).float().mean().item()
-    # Balanced accuracy
-    from sklearn.metrics import balanced_accuracy_score
-    balanced_acc = balanced_accuracy_score(labels.numpy(), preds.numpy())
-    # Negative log-likelihood
-    nll = -torch.log(probs[torch.arange(labels.size(0)), labels]).mean().item()
-    # ECE
-    confidences = probs.max(dim=1)[0]
-    accuracies = preds.eq(labels)
-    bin_boundaries = torch.linspace(0, 1, num_bins + 1)
-    ece = 0.0
-    for i in range(num_bins):
-        mask = (confidences > bin_boundaries[i]) & (confidences <= bin_boundaries[i+1])
-        if mask.sum() > 0:
-            bin_acc = accuracies[mask].float().mean().item()
-            bin_conf = confidences[mask].mean().item()
-            ece += (mask.float().mean().item()) * abs(bin_conf - bin_acc)
-    return {
-        "top1": top1,
-        "balanced_acc": balanced_acc,
-        "nll": nll,
-        "ece": ece * 100,
-    }
+    metrics = _compute_metrics(probs, labels, num_bins=args.ece_bins)
+    print(f"[{args.backend}][{args.dataset}][{args.mode}] -> {metrics}")
 
 if __name__ == "__main__":
     main()
