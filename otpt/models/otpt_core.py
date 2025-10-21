@@ -1,4 +1,5 @@
 import torch
+from typing import Optional
 from contextlib import nullcontext
 from torch.cuda.amp import GradScaler as CudaGradScaler
 from otpt.utils.debug import log, is_debug
