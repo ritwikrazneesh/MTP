@@ -124,5 +124,7 @@ class PromptLearner(nn.Module):
             mask = torch.nn.functional.pad(mask, (0, pad_amt))
 
         if is_debug():
-            log(f"[PL] compose_embeds -> embeds={tuple(embeds.shape)}, mask={tuple(mask.shape)}")
+            # sanity log to confirm gradient path
+            log(f"[PL-DGB] ctx_req={self.ctx.requires_grad}, embeds_req={embeds.requires_grad}")
+            # embeds must depend on ctx; if not, something disabled grad above
         return embeds, mask
