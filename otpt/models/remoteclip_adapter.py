@@ -96,26 +96,23 @@ class PromptLearner(nn.Module):
             log("[PL] reset ctx to deterministic init")
 
     def compose_embeds(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        N, L, d = self.token_emb_fixed.shape  # N = C*T
-        L_new = L + self.n_ctx
+        """
+        Differentiable assembly: embeds = cat(prefix, ctx, suffix).
+        """
+        N, L, d = self.token_emb_fixed.shape
         device = self.token_emb_fixed.device
-        dtype = self.token_emb_fixed.dtype
 
-        embeds = torch.zeros((N, L_new, d), device=device, dtype=dtype)
-        mask = torch.zeros((N, L_new), device=device, dtype=self.attn_mask.dtype)
+        prefix = self.token_emb_fixed[:, : self.ctx_pos, :]        # [N, 1, d]
+        suffix = self.token_emb_fixed[:, self.ctx_pos :, :]        # [N, L-1, d]
 
-        for i in range(N):
-            prefix = self.token_emb_fixed[i, : self.ctx_pos, :]
-            suffix = self.token_emb_fixed[i, self.ctx_pos :, :]
-            embeds[i, : self.ctx_pos, :] = prefix
-            embeds[i, self.ctx_pos : self.ctx_pos + self.n_ctx, :] = self.ctx
-            embeds[i, self.ctx_pos + self.n_ctx :, :] = suffix
-
-            m_pref = self.attn_mask[i, : self.ctx_pos]
-            m_suff = self.attn_mask[i, self.ctx_pos :]
-            mask[i, : self.ctx_pos] = m_pref
-            mask[i, self.ctx_pos : self.ctx_pos + self.n_ctx] = 1
-            mask[i, self.ctx_pos + self.n_ctx :] = m_suff
+        if self.n_ctx > 0:
+            ctx_exp = self.ctx.unsqueeze(0).expand(N, -1, -1)     # [N, n_ctx, d], requires_grad=True
+            embeds = torch.cat([prefix, ctx_exp, suffix], dim=1)  # [N, L+n_ctx, d]
+            ones_ctx = torch.ones((N, self.n_ctx), device=device, dtype=self.attn_mask.dtype)
+            mask = torch.cat([self.attn_mask[:, : self.ctx_pos], ones_ctx, self.attn_mask[:, self.ctx_pos :]], dim=1)
+        else:
+            embeds = torch.cat([prefix, suffix], dim=1)
+            mask = torch.cat([self.attn_mask[:, : self.ctx_pos], self.attn_mask[:, self.ctx_pos :]], dim=1)
 
         max_length = self.model.positional_embedding.shape[0]
         if embeds.shape[1] > max_length:
