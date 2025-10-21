@@ -5,7 +5,6 @@ from torch.cuda.amp import GradScaler as CudaGradScaler
 from otpt.utils.debug import log, is_debug
 
 def avg_entropy_softmax_stable(logits: torch.Tensor) -> torch.Tensor:
-    # Stable H(p) with p=softmax(logits)
     log_probs = torch.log_softmax(logits, dim=1)
     probs = log_probs.exp()
     h = -(probs * log_probs).sum(dim=1).mean()
@@ -24,8 +23,7 @@ def select_confident_indices_stable(logits: torch.Tensor, percentile: float = 0.
     return idx
 
 def orthogonality_loss_on_text(text_feats: torch.Tensor) -> torch.Tensor:
-    # text_feats: [C, D], rows L2-normalized
-    G = text_feats @ text_feats.t()  # [C, C]
+    G = text_feats @ text_feats.t()
     I = torch.eye(G.size(0), device=G.device, dtype=G.dtype)
     loss = ((G - I) ** 2).mean()
     if is_debug():
@@ -68,7 +66,7 @@ def otpt_adapt_and_infer(
     selection_p: float = 0.1,
     lr: float = 5e-3,
 ) -> torch.Tensor:
-    use_cuda_amp = False  # stability for small prompt params
+    use_cuda_amp = False
     scaler = CudaGradScaler(enabled=False)
     amp_ctx = nullcontext()
 
@@ -89,15 +87,23 @@ def otpt_adapt_and_infer(
             with torch.no_grad():
                 img_feats = model_wrapper.encode_image(images)  # [B, D]
 
-            sims = img_feats @ text_feats.t()  # [B, C], cosine similarities (no exp(logit_scale))
+            sims = img_feats @ text_feats.t()  # [B, C]
             idx = select_confident_indices_stable(sims.detach(), percentile=selection_p)
 
             loss_ent = avg_entropy_softmax_stable(sims[idx])
             loss_orth = orthogonality_loss_on_text(text_feats)
             loss = loss_ent + lambda_orth * loss_orth
 
+        # ---- diagnostics before backward ----
         if is_debug():
-            log(f"[O-TPT][{step+1}/{tta_steps}] ctx_norm={prompt_learner.ctx.norm().item():.6f}, loss_ent={loss_ent.item():.6f}, loss_orth={loss_orth.item():.6f}, total={loss.item():.6f}")
+            log(f"[DBG] ctx.requires_grad={prompt_learner.ctx.requires_grad}, embeds.requires_grad={embeds.requires_grad}, "
+                f"text_feats_all.requires_grad={text_feats_all.requires_grad}, text_feats.requires_grad={text_feats.requires_grad}, "
+                f"loss.requires_grad={loss.requires_grad}, n_ctx={prompt_learner.n_ctx}")
+        assert prompt_learner.n_ctx > 0, "O-TPT requires n_ctx > 0"
+        assert prompt_learner.ctx.requires_grad, "ctx.requires_grad is False (ctx must be nn.Parameter)"
+        assert embeds.requires_grad, "embeds is not connected to ctx (compose_embeds must use differentiable ops)"
+        assert text_feats.requires_grad, "text_feats detached (encode_text_from_tokens must propagate grad)"
+        assert loss.requires_grad, "loss does not require grad (graph disconnected)"
 
         optim.zero_grad(set_to_none=True)
         loss.backward()
@@ -132,11 +138,8 @@ def otpt_adapt_and_infer(
             log(f"[O-TPT] logits finite ratio={finite_ratio:.3f}")
         return logits
 
-# ---------- Temperature Scaling utilities ----------
-
 @torch.no_grad()
 def apply_temperature(logits: torch.Tensor, T: float) -> torch.Tensor:
-    # Positive scalar; preserves argmax ordering
     return logits / max(T, 1e-6)
 
 @torch.no_grad()
@@ -145,7 +148,6 @@ def compute_ece(probs: torch.Tensor, labels: torch.Tensor, num_bins: int = 15) -
     accuracies = preds.eq(labels)
     bin_boundaries = torch.linspace(0, 1, num_bins + 1, device=probs.device, dtype=probs.dtype)
     ece = probs.new_tensor(0.0)
-    N = probs.size(0)
     for i in range(num_bins):
         lower, upper = bin_boundaries[i], bin_boundaries[i+1]
         mask = (confidences > lower) & (confidences <= upper)
@@ -164,16 +166,12 @@ def nll_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
 def find_best_temperature(
     logits: torch.Tensor,
     labels: Optional[torch.Tensor] = None,
-    metric: str = "ece",          # "ece" | "nll" | "entropy" (unsupervised)
+    metric: str = "ece",
     num_bins: int = 15,
     T_min: float = 0.5,
     T_max: float = 5.0,
     steps: int = 40,
 ) -> float:
-    """
-    Grid-search best scalar temperature. If labels is None and metric='entropy',
-    chooses T minimizing average entropy (unsupervised).
-    """
     best_T, best_val = 1.0, float("inf")
     grid = torch.linspace(T_min, T_max, steps=steps)
     for T in grid:
@@ -184,7 +182,7 @@ def find_best_temperature(
             val = (-(probs * log_probs).sum(dim=1)).mean().item()
         elif metric == "nll":
             val = nll_from_logits(scaled, labels).item()
-        else:  # "ece"
+        else:
             probs = torch.softmax(scaled, dim=1)
             val = compute_ece(probs, labels, num_bins=num_bins).item()
         if val < best_val:
