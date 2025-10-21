@@ -51,6 +51,12 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+        # ... inside main() right after args parsing ...
+    if args.mode == "otpt" and args.n_ctx <= 0:
+        raise SystemExit("O-TPT requires --n-ctx > 0 (e.g., --n-ctx 8 or 16).")
+
+    
     device = args.device if torch.cuda.is_available() else "cpu"
 
     # Build model + preprocess + tokenizer
