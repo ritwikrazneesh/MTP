@@ -2,8 +2,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 from torchvision import datasets
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import difflib
+import numpy as np
+import torch
 
 # All treated as single-label ImageFolder datasets (class subdirectories)
 SUPPORTED_RS_DATASETS = {
@@ -82,7 +84,7 @@ _REPLACEMENTS: Dict[str, str] = {
     "parkinglot": "parking lot",
     "parking area": "parking lot",
     "tennis-court": "tennis court",
-    "baseball field": "baseball diamond",  # often named differently
+    "baseball field": "baseball diamond",
     "basketball-court": "basketball court",
     "railwaystation": "railway station",
     "railway station": "railway station",
@@ -130,6 +132,47 @@ def map_folder_classes_to_canonical(folder_classes: List[str], dataset_name: str
         return [_normalize(c) for c in folder_classes]
     return [_fuzzy_map_one(c, canon) for c in folder_classes]
 
+def _choose_subset_indices(
+    targets: List[int],
+    num_classes: int,
+    subset_samples: int = 0,
+    subset_per_class: int = 0,
+    seed: int = 0,
+) -> Optional[List[int]]:
+    """
+    Produce a subset of indices given either:
+      - subset_per_class > 0: stratified, up to M per class
+      - else subset_samples > 0: uniform random subset of total N
+    Returns None if no subsetting requested.
+    """
+    N = len(targets)
+    if subset_per_class <= 0 and subset_samples <= 0:
+        return None
+
+    rng = np.random.default_rng(seed)
+
+    if subset_per_class > 0:
+        # Stratified per-class subset
+        class_to_idx: Dict[int, List[int]] = {c: [] for c in range(num_classes)}
+        for i, y in enumerate(targets):
+            class_to_idx[int(y)].append(i)
+
+        chosen = []
+        for c in range(num_classes):
+            idxs = class_to_idx[c]
+            if not idxs:
+                continue
+            k = min(len(idxs), subset_per_class)
+            sel = rng.choice(idxs, size=k, replace=False)
+            chosen.extend(int(i) for i in sel)
+        rng.shuffle(chosen)
+        return chosen
+
+    # Uniform subset over all samples
+    k = min(N, subset_samples)
+    chosen = rng.choice(np.arange(N), size=k, replace=False)
+    return [int(i) for i in chosen]
+
 def build_imagefolder_eval(
     dataset_name: str,
     data_root: str,
@@ -137,20 +180,41 @@ def build_imagefolder_eval(
     batch_size: int,
     num_workers: int,
     use_canonical: bool = True,
+    subset_samples: int = 0,
+    subset_per_class: int = 0,
+    subset_seed: int = 0,
 ) -> Tuple[Tuple[Optional[DataLoader], DataLoader], List[str]]:
     """
     Returns (None, val_loader) and a classnames list for prompts.
     The classnames are in the same order as the dataset's label indices.
     If use_canonical=True, we map folder class names to canonical phrases per dataset.
+    If subsetting is requested, we return a DataLoader over a Subset of the dataset for faster runs.
     """
     eval_root = resolve_eval_root(data_root, dataset_name)
     ds = datasets.ImageFolder(str(eval_root), transform=preprocess)
 
+    # Prepare classnames (prompt texts)
     folder_classes = ds.classes  # order matches class_to_idx / labels
     if use_canonical and dataset_name.lower() in SUPPORTED_RS_DATASETS:
         classnames = map_folder_classes_to_canonical(folder_classes, dataset_name)
     else:
         classnames = [_canonicalize_classname(c) for c in folder_classes]
+
+    # Optional subsetting
+    subset_idx = _choose_subset_indices(
+        targets=getattr(ds, "targets", [y for _, y in ds.samples]),
+        num_classes=len(folder_classes),
+        subset_samples=subset_samples,
+        subset_per_class=subset_per_class,
+        seed=subset_seed,
+    )
+    if subset_idx is not None:
+        ds = Subset(ds, subset_idx)
+        effective = len(subset_idx)
+        print(f"[Subset] Using {effective} samples "
+              f"({'stratified' if subset_per_class > 0 else 'uniform'}) from original dataset.")
+    else:
+        print(f"[Subset] Using full dataset: {len(getattr(ds, 'dataset', ds).samples) if isinstance(ds, Subset) else len(ds.samples)} samples.")
 
     val_loader = DataLoader(
         ds,
