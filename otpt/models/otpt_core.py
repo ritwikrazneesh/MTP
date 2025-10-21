@@ -47,7 +47,6 @@ def infer_logits(model_wrapper, prompt_learner, images: torch.Tensor) -> torch.T
         text_feats = text_feats_all
         if is_debug():
             log(f"[ZS] templates=1, text_feats={tuple(text_feats.shape)}")
-
     img_feats = model_wrapper.encode_image(images)
     if is_debug():
         log(f"[ZS] img_feats={tuple(img_feats.shape)}, text_feats={tuple(text_feats.shape)}")
@@ -73,7 +72,7 @@ def otpt_adapt_and_infer(
     optim = torch.optim.AdamW([prompt_learner.ctx], lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
 
     for step in range(tta_steps):
-        with amp_ctx:
+        with amp_ctx, torch.enable_grad():
             embeds, mask = prompt_learner.compose_embeds()
             text_feats_all = model_wrapper.encode_text_from_tokens(embeds, mask)  # [C*T, D]
             if hasattr(prompt_learner, "n_tpl") and prompt_learner.n_tpl > 1:
@@ -94,7 +93,6 @@ def otpt_adapt_and_infer(
             loss_orth = orthogonality_loss_on_text(text_feats)
             loss = loss_ent + lambda_orth * loss_orth
 
-        # ---- diagnostics before backward ----
         if is_debug():
             log(f"[DBG] ctx.requires_grad={prompt_learner.ctx.requires_grad}, embeds.requires_grad={embeds.requires_grad}, "
                 f"text_feats_all.requires_grad={text_feats_all.requires_grad}, text_feats.requires_grad={text_feats.requires_grad}, "
@@ -137,56 +135,3 @@ def otpt_adapt_and_infer(
             finite_ratio = torch.isfinite(logits).float().mean().item()
             log(f"[O-TPT] logits finite ratio={finite_ratio:.3f}")
         return logits
-
-@torch.no_grad()
-def apply_temperature(logits: torch.Tensor, T: float) -> torch.Tensor:
-    return logits / max(T, 1e-6)
-
-@torch.no_grad()
-def compute_ece(probs: torch.Tensor, labels: torch.Tensor, num_bins: int = 15) -> torch.Tensor:
-    confidences, preds = probs.max(dim=1)
-    accuracies = preds.eq(labels)
-    bin_boundaries = torch.linspace(0, 1, num_bins + 1, device=probs.device, dtype=probs.dtype)
-    ece = probs.new_tensor(0.0)
-    for i in range(num_bins):
-        lower, upper = bin_boundaries[i], bin_boundaries[i+1]
-        mask = (confidences > lower) & (confidences <= upper)
-        if mask.any():
-            bin_acc = accuracies[mask].float().mean()
-            bin_conf = confidences[mask].mean()
-            ece = ece + (mask.float().mean()) * (bin_conf - bin_acc).abs()
-    return ece
-
-@torch.no_grad()
-def nll_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    log_probs = torch.log_softmax(logits, dim=1)
-    return -log_probs[torch.arange(labels.numel(), device=labels.device), labels].mean()
-
-@torch.no_grad()
-def find_best_temperature(
-    logits: torch.Tensor,
-    labels: Optional[torch.Tensor] = None,
-    metric: str = "ece",
-    num_bins: int = 15,
-    T_min: float = 0.5,
-    T_max: float = 5.0,
-    steps: int = 40,
-) -> float:
-    best_T, best_val = 1.0, float("inf")
-    grid = torch.linspace(T_min, T_max, steps=steps)
-    for T in grid:
-        scaled = apply_temperature(logits, float(T))
-        if metric == "entropy" or labels is None:
-            log_probs = torch.log_softmax(scaled, dim=1)
-            probs = log_probs.exp()
-            val = (-(probs * log_probs).sum(dim=1)).mean().item()
-        elif metric == "nll":
-            val = nll_from_logits(scaled, labels).item()
-        else:
-            probs = torch.softmax(scaled, dim=1)
-            val = compute_ece(probs, labels, num_bins=num_bins).item()
-        if val < best_val:
-            best_val, best_T = val, float(T)
-    if is_debug():
-        log(f"[TS] best_T={best_T:.3f}, metric={metric}, value={best_val:.6f}")
-    return best_T
