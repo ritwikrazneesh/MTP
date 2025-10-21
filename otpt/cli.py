@@ -147,26 +147,37 @@ def main():
         logits_scaled = apply_temperature(logits, T)
         probs_scaled = torch.softmax(logits_scaled, dim=1)
         # ECE after TS
-        ece = _compute_ece(probs_scaled, labels, num_bins=args.ece_bins)
-        print(f"Top-1: {top1*100:.2f}%, ECE (TS): {ece*100:.2f}%  [T*={T:.3f}]")
+        metrics = _compute_metrics(probs_scaled, labels, num_bins=args.ece_bins)
+        print(f"[remoteclip][{args.dataset}][{args.mode}] -> {metrics}")
     else:
-        ece = _compute_ece(probs, labels, num_bins=args.ece_bins)
-        print(f"Top-1: {top1*100:.2f}%, ECE: {ece*100:.2f}%")
+        metrics = _compute_metrics(probs, labels, num_bins=args.ece_bins)
+        print(f"[remoteclip][{args.dataset}][{args.mode}] -> {metrics}")
 
-def _compute_ece(probs: torch.Tensor, labels: torch.Tensor, num_bins: int = 15) -> float:
-    confidences, preds = probs.max(dim=1)
+def _compute_metrics(probs: torch.Tensor, labels: torch.Tensor, num_bins: int = 15):
+    preds = probs.argmax(dim=1)
+    top1 = (preds == labels).float().mean().item()
+    # Balanced accuracy
+    from sklearn.metrics import balanced_accuracy_score
+    balanced_acc = balanced_accuracy_score(labels.numpy(), preds.numpy())
+    # Negative log-likelihood
+    nll = -torch.log(probs[torch.arange(labels.size(0)), labels]).mean().item()
+    # ECE
+    confidences = probs.max(dim=1)[0]
     accuracies = preds.eq(labels)
     bin_boundaries = torch.linspace(0, 1, num_bins + 1)
     ece = 0.0
-    N = probs.size(0)
     for i in range(num_bins):
-        lower, upper = bin_boundaries[i], bin_boundaries[i+1]
-        mask = (confidences > lower) & (confidences <= upper)
-        if mask.any():
+        mask = (confidences > bin_boundaries[i]) & (confidences <= bin_boundaries[i+1])
+        if mask.sum() > 0:
             bin_acc = accuracies[mask].float().mean().item()
             bin_conf = confidences[mask].mean().item()
             ece += (mask.float().mean().item()) * abs(bin_conf - bin_acc)
-    return ece
+    return {
+        "top1": top1,
+        "balanced_acc": balanced_acc,
+        "nll": nll,
+        "ece": ece * 100,
+    }
 
 if __name__ == "__main__":
     main()
